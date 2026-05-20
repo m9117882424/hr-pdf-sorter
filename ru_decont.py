@@ -630,6 +630,7 @@ def build_excel_indexes(ws, header_row: int, headers: dict[str, int]) -> dict:
         raise ValueError("В Excel не найдены обязательные столбцы: ФИО рус, Дата оплаты, Y.T.C № Кимлики")
 
     exact = {}
+    by_date_id = defaultdict(list)
     by_name_date = defaultdict(list)
     by_name_id = defaultdict(list)
     by_name = defaultdict(list)
@@ -638,8 +639,13 @@ def build_excel_indexes(ws, header_row: int, headers: dict[str, int]) -> dict:
         fio = normalize_name(ws.cell(row=row, column=fio_col).value)
         pay_date = normalize_date(ws.cell(row=row, column=date_col).value)
         kimlik = normalize_id(ws.cell(row=row, column=kimlik_col).value)
+
+        if pay_date and kimlik:
+            by_date_id[(pay_date, kimlik)].append(row)
+
         if not fio:
             continue
+
         exact[(fio, pay_date, kimlik)] = row
         by_name_date[(fio, pay_date)].append(row)
         by_name_id[(fio, kimlik)].append(row)
@@ -647,6 +653,7 @@ def build_excel_indexes(ws, header_row: int, headers: dict[str, int]) -> dict:
 
     return {
         "exact": exact,
+        "by_date_id": by_date_id,
         "by_name_date": by_name_date,
         "by_name_id": by_name_id,
         "by_name": by_name,
@@ -662,6 +669,12 @@ def find_excel_row(indexes: dict, rec: PdfRecord) -> tuple[Optional[int], str]:
         row = indexes["exact"].get((fio, date, kimlik))
         if row:
             return row, "ФИО + дата из документа + кимлик"
+
+    if date and kimlik:
+        rows = indexes["by_date_id"].get((date, kimlik), [])
+        if len(rows) == 1:
+            return rows[0], "дата из документа + кимлик, строка уникальна"
+
     if fio and date:
         rows = indexes["by_name_date"].get((fio, date), [])
         if len(rows) == 1:
