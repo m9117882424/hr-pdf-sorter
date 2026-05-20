@@ -1,2 +1,5 @@
-# No external dependencies are required.
-# The script uses only Python standard library modules.
+PyMuPDF
+pdfplumber
+pytesseract
+Pillow
+openpyxl
