@@ -1,24 +1,24 @@
 # HR PDF Sorter
 
-Набор утилит для обработки HR-платёжек в PDF:
+Набор утилит для обработки HR-платежек в PDF:
 
 1. раскладка PDF по папкам сотрудников;
-2. сверка русских платёжек с Excel;
-3. OCR-распознавание сканов и многостраничных документов.
-
-Репозиторий хранит только код и обезличенную документацию. Реальные PDF, Excel и CSV-отчёты с персональными данными в Git не добавляются.
+2. сверка русских платежек с Excel;
+3. OCR-распознавание сканов и многостраничных документов;
+4. ускоренная параллельная обработка пачки PDF.
 
 ## Состав проекта
 
 | Файл | Назначение |
 | --- | --- |
-| `sort_payment_pdfs.py` | Раскладывает PDF-файлы по папкам сотрудников на основании ФИО в имени файла. По умолчанию работает в безопасном режиме проверки без перемещения. |
-| `ru_decont.py` | Читает русские PDF-платёжки, извлекает дату, ИНН/кимлик, ФИО и суммы, затем заполняет найденные строки в Excel начиная с колонки `AH`. |
-| `compare_ru_decont.bat` | Windows-запуск для `ru_decont.py` с ожидаемой структурой `excel_input\input.xlsx` и папкой PDF `pp_ru`. |
-| `requirements.txt` | Python-зависимости для PDF/OCR/Excel-обработки. |
-| `.gitignore` | Исключает PDF, Excel, CSV, отчёты, виртуальные окружения и служебные файлы. |
+| `sort_payment_pdfs.py` | Раскладывает PDF-файлы по папкам сотрудников по ФИО в имени файла. |
+| `ru_decont.py` | Базовый движок сверки PDF с Excel. Извлекает дату, ИНН/кимлик, ФИО и суммы, затем заполняет Excel начиная с `AH`. |
+| `ru_decont_fast.py` | Быстрый запускатель. Обрабатывает PDF параллельно, Excel заполняет последовательно. |
+| `compare_ru_decont.bat` | Windows-запуск ускоренного режима. |
+| `requirements.txt` | Python-зависимости. |
+| `.gitignore` | Исключения для рабочих файлов и отчетов. |
 
-Подробное описание каждого скрипта вынесено в [`docs/SCRIPTS.md`](docs/SCRIPTS.md).
+Подробное описание скриптов: [`docs/SCRIPTS.md`](docs/SCRIPTS.md).
 
 ## Установка
 
@@ -28,83 +28,85 @@
 py -m pip install -r requirements.txt
 ```
 
-Для OCR нужен установленный Tesseract OCR. На Windows скрипт автоматически проверяет стандартный путь:
+Для OCR нужен Tesseract OCR. На Windows ожидается стандартный путь:
 
 ```text
 C:\Program Files\Tesseract-OCR\tesseract.exe
 ```
 
-Для русскоязычных сканов желательно установить языковой пакет `rus.traineddata`. Если русского пакета нет, часть цифровых полей будет распознаваться через английский OCR, но ФИО может просесть по качеству.
+Для русских сканов желательно установить языковой пакет `rus.traineddata`.
 
 ## Сценарий 1. Раскладка PDF по папкам сотрудников
 
-### Пример структуры
-
-```text
-для HR/
-├─ Аббасов Азер/
-├─ Абдразак Мухаммед-Шариф/
-├─ Абдукадиров Бахтиёр/
-├─ ПП от 02.10.2025 Абдразак Мухаммед-Шариф_rus.pdf
-├─ ПП от 11.11.2025 Аббасов Азер_rus.pdf
-└─ sort_payment_pdfs.py
-```
-
-### Проверка без перемещения
+Проверка без перемещения:
 
 ```bat
 py sort_payment_pdfs.py --dir "C:\Users\Maksim\Desktop\для HR"
 ```
 
-Если скрипт лежит прямо в рабочей папке:
-
-```bat
-py sort_payment_pdfs.py
-```
-
-### Реальное перемещение
+Реальное перемещение:
 
 ```bat
 py sort_payment_pdfs.py --dir "C:\Users\Maksim\Desktop\для HR" --move
 ```
 
-### Полезные параметры
+Отчет:
 
 ```bat
-py sort_payment_pdfs.py --min-score 0.82
-py sort_payment_pdfs.py --recursive-pdfs
-py sort_payment_pdfs.py --recursive-folders
 py sort_payment_pdfs.py --report reports\sort_report.csv
 ```
 
-Статусы в отчёте:
+## Сценарий 2. Сверка русских PDF-платежек с Excel
 
-- `DRY_RUN` — совпадение найдено, но файл не перемещался;
-- `MOVED` — файл перемещён;
-- `SKIPPED_NOT_FOUND` — подходящая папка не найдена;
-- `SKIPPED_AMBIGUOUS` — совпадение неоднозначное;
-- `ERROR` — ошибка файловой операции.
+### Ожидаемая структура для быстрого запуска
 
-## Сценарий 2. Сверка русских PDF-платёжек с Excel
-
-`ru_decont.py` нужен для кейса, где есть Excel-реестр сотрудников/платежей и папка PDF-платёжек. Скрипт извлекает из PDF реквизиты и дописывает их в Excel.
-
-### Ожидаемая структура
+Если используется `compare_ru_decont.bat`, рядом с BAT должны лежать оба Python-файла, Excel и папка `pp_ru` с PDF:
 
 ```text
-hr-pdf-sorter/
+для HR/
 ├─ ru_decont.py
+├─ ru_decont_fast.py
 ├─ compare_ru_decont.bat
-├─ excel_input/
-│  └─ input.xlsx
+├─ input.xlsx
 └─ pp_ru/
-   ├─ ПП от 08.01.2026 ТЕМИРОВ ДАНИСЛАМ rus.pdf
-   └─ ...
+   ├─ file1.pdf
+   └─ file2.pdf
+```
+
+Важно: `ru_decont_fast.py` не заменяет `ru_decont.py`. Он импортирует его как основной модуль, поэтому оба файла должны быть в одной папке.
+
+Если рядом нет `ru_decont.py`, будет ошибка:
+
+```text
+ModuleNotFoundError: No module named 'ru_decont'
+```
+
+Если в `pp_ru` нет PDF, будет ошибка:
+
+```text
+FileNotFoundError: No PDF files in folder: pp_ru
+```
+
+### Быстрая проверка перед запуском
+
+В папке проекта выполнить:
+
+```bat
+dir ru_decont.py ru_decont_fast.py compare_ru_decont.bat input.xlsx
+dir pp_ru\*.pdf
+```
+
+Должны быть найдены:
+
+```text
+ru_decont.py
+ru_decont_fast.py
+compare_ru_decont.bat
+input.xlsx
+минимум один PDF в pp_ru
 ```
 
 ### Обязательные колонки в Excel
-
-Скрипт ищет строку заголовков в первых 20 строках. В Excel должны быть колонки:
 
 ```text
 ФИО рус
@@ -118,25 +120,56 @@ Y.T.C № Кимлики
 compare_ru_decont.bat
 ```
 
+Текущий BAT запускает ускоренный режим:
+
+```bat
+py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 3
+```
+
 ### Запуск вручную
 
-```bat
-py ru_decont.py --excel "excel_input\input.xlsx" --pdf-dir "pp_ru"
-```
-
-Если нужен конкретный лист:
+Быстрый режим:
 
 ```bat
-py ru_decont.py --excel "excel_input\input.xlsx" --pdf-dir "pp_ru" --sheet "Лист1"
+py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 3
 ```
 
-Отключить OCR:
+Если Excel лежит в подпапке:
 
 ```bat
-py ru_decont.py --excel "excel_input\input.xlsx" --pdf-dir "pp_ru" --no-ocr
+py ru_decont_fast.py --excel "excel_input\input.xlsx" --pdf-dir "pp_ru" --workers 3
 ```
 
-## Что заполняет `ru_decont.py`
+Если PDF лежат рядом со скриптом, а не в `pp_ru`:
+
+```bat
+py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "." --workers 3
+```
+
+Базовый режим для диагностики:
+
+```bat
+py ru_decont.py --excel "input.xlsx" --pdf-dir "pp_ru"
+```
+
+### Настройка скорости
+
+`--workers` задает количество параллельных процессов OCR/парсинга PDF:
+
+```bat
+py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 2
+py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 3
+py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 4
+```
+
+Рекомендации:
+
+- `--workers 2` — для слабого ПК;
+- `--workers 3` — рекомендуемый баланс;
+- `--workers 4` — для более мощной машины;
+- больше `4` обычно не нужно.
+
+## Что заполняет сверка
 
 Данные записываются в исходный Excel начиная с колонки `AH`:
 
@@ -149,13 +182,13 @@ py ru_decont.py --excel "excel_input\input.xlsx" --pdf-dir "pp_ru" --no-ocr
 | `AL` | Сумма |
 | `AM` | Сумма 2 |
 
-Итоговый файл сохраняется рядом с исходным Excel:
+Итоговый файл:
 
 ```text
 input_RU_decont_filled.xlsx
 ```
 
-Также формируются CSV-отчёты:
+Отчеты:
 
 ```text
 RU_decont_parsed_report.csv
@@ -165,8 +198,6 @@ RU_decont_ocr_debug_report.csv
 
 ## Логика сопоставления PDF с Excel
 
-Скрипт использует безопасную стратегию матчинга:
-
 1. `ФИО + дата + кимлик`;
 2. `дата + кимлик`, если в Excel такая строка одна;
 3. `ФИО + дата`, если совпадение единственное;
@@ -175,50 +206,50 @@ RU_decont_ocr_debug_report.csv
 
 Второй пункт нужен для сканов, где OCR плохо читает ФИО или имя файла повреждено кодировкой, но дата и кимлик распознаны корректно.
 
-Если безопасного совпадения нет, PDF не записывается в Excel и попадает в `RU_decont_unmatched_report.csv`.
+## Типовые проблемы
 
-## OCR и многостраничные PDF
+### `ModuleNotFoundError: No module named 'ru_decont'`
 
-`ru_decont.py` поддерживает сканы и многостраничные PDF. Для платёжек, где есть почти пустые страницы-продолжения, скрипт определяет полезные страницы с таблицами платежа и пропускает пустые/служебные страницы.
+Рядом с `ru_decont_fast.py` нет файла `ru_decont.py`. Решение:
 
-Поддерживаемые поля OCR:
-
-- дата документа в верхнем правом блоке;
-- ИНН / кимлик;
-- ФИО в блоке налогоплательщика;
-- суммы платежей;
-- старые и новые шаблоны Ziraat Bankasi.
-
-В отчётах фиксируются:
-
-```text
-Страниц PDF
-Полезные страницы
-Пропущенные страницы
-Все суммы
-Кол-во сумм
+```bat
+git pull origin main
 ```
 
-## Типовые проблемы
+Или скопировать `ru_decont.py` рядом с `ru_decont_fast.py`.
+
+### `FileNotFoundError: No PDF files in folder: pp_ru`
+
+Папка `pp_ru` пустая, отсутствует или PDF лежат в другом месте. Проверка:
+
+```bat
+dir pp_ru\*.pdf
+```
+
+Если PDF лежат рядом со скриптом:
+
+```bat
+py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "." --workers 3
+```
 
 ### PDF попал в `unmatched`
 
 Проверить `RU_decont_unmatched_report.csv`:
 
-- какое ФИО распознано;
-- какая дата распознана;
-- какой кимлик распознан;
-- какой `match_mode` указан.
+- распознанное ФИО;
+- дату;
+- кимлик;
+- `match_mode`.
 
-Если ФИО пустое, но дата и кимлик есть, новая версия попробует найти строку по `дата + кимлик`. Если всё равно `unmatched`, значит в Excel нет уникальной строки с такой парой.
+Если ФИО пустое, но дата и кимлик есть, скрипт попробует найти строку по `дата + кимлик`. Если все равно `unmatched`, значит в Excel нет уникальной строки с такой парой.
 
 ### OCR не видит ФИО
 
-Проверить `RU_decont_ocr_debug_report.csv`, поле `raw_name_ocr`. Если там мусор, матчинг всё равно может пройти по `дата + кимлик`, если такая строка в Excel уникальна.
+Проверить `RU_decont_ocr_debug_report.csv`, поле `raw_name_ocr`.
 
 ### Tesseract не найден
 
-Проверить установку Tesseract и путь:
+Проверить:
 
 ```bat
 "C:\Program Files\Tesseract-OCR\tesseract.exe" --version
@@ -226,18 +257,10 @@ RU_decont_ocr_debug_report.csv
 
 ## Безопасность данных
 
-Не коммитить:
+Не добавлять в Git реальные PDF, Excel, CSV-отчеты, скриншоты документов и рабочие файлы с персональными данными.
 
-- реальные PDF;
-- Excel-реестры;
-- CSV-отчёты;
-- скриншоты документов;
-- персональные данные сотрудников.
-
-`.gitignore` уже исключает основные рабочие форматы, но перед `git add` всё равно проверять:
+Перед коммитом проверять:
 
 ```bat
 git status
 ```
-
-Контрольная мысль: в Git должен ехать код, а не HR-чемодан с персональными данными.
