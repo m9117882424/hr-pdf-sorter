@@ -1,0 +1,27 @@
+# Personal / business documents
+*.pdf
+*.PDF
+*.xlsx
+*.xls
+*.csv
+
+# Runtime reports and output folders
+reports/
+logs/
+output/
+pdf_renamed/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
