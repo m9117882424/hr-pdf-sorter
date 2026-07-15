@@ -7,7 +7,7 @@
 | Скрипт | Для чего нужен | Основной запуск |
 | --- | --- | --- |
 | `sort_payment_pdfs.py` | Раскладка PDF по папкам сотрудников по ФИО в имени файла. | `py sort_payment_pdfs.py --dir "папка" --move` |
-| `ru_decont.py` | Базовый движок сверки русских PDF-платёжек с Excel. | `py ru_decont.py --excel "input.xlsx" --pdf-dir "pp_ru"` |
+| `ru_decont.py` | Базовый движок сверки PDF-платёжек Ziraat с Excel. Поддерживает русские и турецкие формы. | `py ru_decont.py --excel "input.xlsx" --pdf-dir "pp_ru"` |
 | `ru_decont_fast.py` | Быстрый запускатель сверки: PDF обрабатываются параллельно, Excel заполняется последовательно. | `py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 3` |
 | `compare_ru_decont.bat` | Windows-запуск ускоренного режима. | двойной клик по BAT |
 
@@ -34,18 +34,6 @@
 5. Считает совпадение через токены и fuzzy-score.
 6. В безопасном режиме показывает план перемещения.
 7. В боевом режиме перемещает файл в найденную папку.
-
-### Входные данные
-
-- папка с PDF;
-- папки сотрудников;
-- имя PDF должно содержать ФИО или достаточно похожее написание ФИО.
-
-### Выходные данные
-
-- перемещённые PDF, если указан `--move`;
-- консольный лог;
-- CSV-отчёт, если указан `--report`.
 
 ### Основные команды
 
@@ -79,29 +67,24 @@ py sort_payment_pdfs.py --report reports\sort_report.csv
 | `--recursive-folders` | Искать папки сотрудников рекурсивно. |
 | `--report` | Путь к CSV-отчёту. |
 
-### Когда использовать
-
-Использовать, когда нужно разложить PDF по папкам, а сопоставление можно сделать по ФИО в имени файла.
-
-### Когда не использовать
-
-Не использовать для сверки PDF с Excel. Для сверки есть `ru_decont.py` и `ru_decont_fast.py`.
-
 ---
 
 ## `ru_decont.py`
 
 ### Назначение
 
-Базовый движок сверки русских PDF-платёжек с Excel-реестром. Скрипт извлекает из PDF дату, ИНН/кимлик, ФИО и суммы, затем дописывает данные в найденные строки Excel.
+Базовый движок сверки PDF-платёжек Ziraat Bankasi с Excel-реестром. Скрипт извлекает из PDF дату, ИНН/кимлик, ФИО и суммы, затем дописывает данные в найденные строки Excel.
 
-Скрипт рассчитан на платёжные документы Ziraat Bankasi в старых и новых шаблонах, включая сканы и многостраничные PDF.
+Поддерживаются два типа документов:
+
+1. Русская форма: `ИНН / Кимлик`, `Фамилия / Наименование`, `Имя`, суммы в русскоязычной таблице.
+2. Турецкая форма: `Vergi Kimlik Numarası`, `TCKNO/VKN:...`, `Soyadı / Ünvanı`, `Adı`, `Tarih`, суммы в столбце `Miktarı`.
 
 ### Как работает
 
 1. Открывает Excel.
 2. Находит строку заголовков с обязательными колонками.
-3. Строит индексы по `ФИО рус`, `Дата оплаты`, `Y.T.C № Кимлики`.
+3. Строит индексы по ФИО, дате и кимлику.
 4. Собирает PDF из указанной папки.
 5. Для текстовых PDF сначала использует `pdfplumber`.
 6. Для сканов и проблемных PDF использует OCR через Tesseract.
@@ -114,36 +97,29 @@ py sort_payment_pdfs.py --report reports\sort_report.csv
 
 Использовать для диагностики или одиночных прогонов, когда скорость не критична. Для рабочих пачек лучше использовать `ru_decont_fast.py`.
 
-### Входные данные
-
-Обязательные колонки в Excel:
+### Обязательные колонки Excel
 
 ```text
-ФИО рус
-Дата оплаты
 Y.T.C № Кимлики
+Дата оплаты
+ФИО или ФИО рус
 ```
 
-Пример структуры:
+Для турецких платёжек латинское имя/фамилия берётся из колонки `ФИО`.
+
+Пример:
 
 ```text
-для HR/
-├─ ru_decont.py
-├─ input.xlsx
-└─ pp_ru/
-   ├─ file1.pdf
-   └─ file2.pdf
+ФИО: VASILII SHIPULIN
+PDF: Soyadı / Ünvanı : SHIPULIN
+PDF: Adı : VASILII
 ```
 
-### Выходные данные
-
-Рядом с исходным Excel создаются:
+Скрипт проверяет оба порядка имени:
 
 ```text
-input_RU_decont_filled.xlsx
-RU_decont_parsed_report.csv
-RU_decont_unmatched_report.csv
-RU_decont_ocr_debug_report.csv
+SHIPULIN VASILII
+VASILII SHIPULIN
 ```
 
 ### Запуск
@@ -210,21 +186,9 @@ FileNotFoundError: No PDF files in folder: pp_ru
 
 ### Быстрая проверка перед запуском
 
-В папке проекта выполнить:
-
 ```bat
 dir ru_decont.py ru_decont_fast.py compare_ru_decont.bat input.xlsx
 dir pp_ru\*.pdf
-```
-
-Должны быть найдены:
-
-```text
-ru_decont.py
-ru_decont_fast.py
-compare_ru_decont.bat
-input.xlsx
-минимум один PDF в pp_ru
 ```
 
 ### Основной запуск
@@ -259,8 +223,6 @@ py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --no-ocr --workers 3
 
 ### Настройка скорости
 
-`--workers` задаёт количество параллельных процессов OCR/парсинга PDF:
-
 ```bat
 py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 2
 py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 3
@@ -288,19 +250,6 @@ py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 4
 py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 3
 ```
 
-### Ожидаемая структура
-
-```text
-для HR/
-├─ ru_decont.py
-├─ ru_decont_fast.py
-├─ compare_ru_decont.bat
-├─ input.xlsx
-└─ pp_ru/
-   ├─ file1.pdf
-   └─ file2.pdf
-```
-
 ### Когда править BAT
 
 Править, если:
@@ -311,15 +260,6 @@ py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 3
 - нужно указать конкретный лист Excel;
 - нужно временно отключить OCR;
 - нужно изменить количество `--workers`.
-
-Примеры:
-
-```bat
-py ru_decont_fast.py --excel "excel_input\input.xlsx" --pdf-dir "pp_ru" --workers 3
-py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "." --workers 3
-py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --sheet "Лист1" --workers 3
-py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 2
-```
 
 ---
 
@@ -346,7 +286,7 @@ py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 2
 4. `ФИО + кимлик`, если найдено одно совпадение;
 5. только `ФИО`, если сотрудник в Excel встречается один раз.
 
-Пункт `дата + кимлик` нужен для сканов, где OCR плохо читает ФИО или имя файла повреждено кодировкой, но дата и кимлик распознаны корректно.
+Для латиницы скрипт учитывает оба порядка ФИО: `фамилия имя` из PDF и `имя фамилия` из Excel.
 
 Если совпадение неоднозначное или отсутствует, Excel не заполняется. Запись уходит в `RU_decont_unmatched_report.csv`.
 
@@ -357,10 +297,10 @@ py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 2
 Скрипт умеет:
 
 - читать сканированные PDF;
-- находить дату в верхнем правом блоке;
-- находить ИНН / кимлик в блоке налогоплательщика;
-- находить ФИО в вариантах `Фамилия / Наименование`, `Фамилия / Должность`, `Фамилия / Звание`;
-- извлекать суммы из таблицы платежа;
+- находить дату в поле `Tarih` и в русских полях даты;
+- находить кимлик в `TCKNO/VKN:...`, `Vergi Kimlik Numarası`, `ИНН / Кимлик`;
+- находить ФИО в `Soyadı / Ünvanı`, `Adı`, `Фамилия / Наименование`, `Фамилия / Должность`, `Фамилия / Звание`;
+- извлекать суммы из столбца `Miktarı` и русскоязычных таблиц;
 - пропускать почти пустые страницы в многостраничных PDF;
 - фиксировать полезные и пропущенные страницы в отчётах.
 
@@ -377,6 +317,7 @@ py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 2
 - `Фамилия / Наименование`;
 - `Имя`;
 - `match_key_name`;
+- `match_key_name_reversed`;
 - `match_key_date`;
 - `match_key_id`;
 - `match_mode`.
@@ -394,8 +335,6 @@ py ru_decont_fast.py --excel "input.xlsx" --pdf-dir "pp_ru" --workers 2
 - `skipped_pages`.
 
 ### Нет PDF в папке
-
-Проверить:
 
 ```bat
 dir pp_ru\*.pdf
