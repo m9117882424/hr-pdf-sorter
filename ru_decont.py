@@ -14,6 +14,7 @@ import fitz  # PyMuPDF
 import pdfplumber
 import pytesseract
 from openpyxl import load_workbook
+from openpyxl.styles import PatternFill
 from PIL import Image, ImageFilter, ImageOps
 
 AH_START = 34  # AH
@@ -24,13 +25,17 @@ OUTPUT_HEADERS = [
     "Имя",
     "Сумма",
     "Сумма 2",
+    "Комментарий сверки",
 ]
+
+MISMATCH_FILL = PatternFill(fill_type="solid", fgColor="FFF2CC")
+COMMENT_FILL = PatternFill(fill_type="solid", fgColor="FCE4D6")
 
 DEFAULT_TESSERACT = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 if DEFAULT_TESSERACT.exists():
     pytesseract.pytesseract.tesseract_cmd = str(DEFAULT_TESSERACT)
 
-DATE_RE = re.compile(r"\b(\d{2})[./-](\d{2})[./-](\d{4})\b")
+DATE_RE = re.compile(r"\b\d{2}[./-]\d{2}[./-]\d{4}\b")
 AMOUNT_RE = re.compile(r"\b\d{1,3}(?:[.\s]\d{3})*,\d{2}\b|\b\d+,\d{2}\b")
 
 
@@ -73,27 +78,26 @@ def normalize_spaces(text) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
-def normalize_header(text) -> str:
-    return normalize_spaces(str(text or "").replace("\n", " "))
+def normalize_turkish_chars(text: str) -> str:
+    table = str.maketrans({
+        "İ": "I", "I": "I", "ı": "I", "i": "I",
+        "Ş": "S", "ş": "S",
+        "Ğ": "G", "ğ": "G",
+        "Ü": "U", "ü": "U",
+        "Ö": "O", "ö": "O",
+        "Ç": "C", "ç": "C",
+    })
+    return str(text or "").translate(table)
 
 
 def normalize_name(text) -> str:
-    text = str(text or "").upper()
-    repl = {
-        "Ё": "Е",
-        "İ": "I",
-        "İ": "I",
-        "Ş": "S",
-        "Ğ": "G",
-        "Ü": "U",
-        "Ö": "O",
-        "Ç": "C",
-        "Â": "A",
-    }
-    for src, dst in repl.items():
-        text = text.replace(src, dst)
+    text = normalize_turkish_chars(str(text or "")).upper().replace("Ё", "Е")
     text = re.sub(r"[^А-ЯA-Z0-9 ]+", " ", text)
     return normalize_spaces(text)
+
+
+def normalize_header(text) -> str:
+    return normalize_spaces(str(text or "")).replace("Ё", "Е")
 
 
 def normalize_date(value) -> str:
@@ -101,20 +105,19 @@ def normalize_date(value) -> str:
         return ""
     if isinstance(value, (dt.datetime, dt.date)):
         return value.strftime("%d.%m.%Y")
+    # Excel serial date fallback.
     if isinstance(value, (int, float)) and 20000 <= float(value) <= 80000:
         base = dt.datetime(1899, 12, 30)
-        return (base + dt.timedelta(days=int(value))).strftime("%d.%m.%Y")
+        try:
+            return (base + dt.timedelta(days=float(value))).strftime("%d.%m.%Y")
+        except Exception:
+            pass
     text = str(value).strip()
-    if re.fullmatch(r"\d+(?:\.0+)?", text):
-        serial = float(text)
-        if 20000 <= serial <= 80000:
-            base = dt.datetime(1899, 12, 30)
-            return (base + dt.timedelta(days=int(serial))).strftime("%d.%m.%Y")
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
     if m:
         yyyy, mm, dd = m.groups()
         return f"{dd}.{mm}.{yyyy}"
-    m = DATE_RE.search(text)
+    m = re.search(r"(\d{2})[./-](\d{2})[./-](\d{4})", text)
     if m:
         dd, mm, yyyy = m.groups()
         return f"{dd}.{mm}.{yyyy}"
@@ -123,6 +126,8 @@ def normalize_date(value) -> str:
 
 def normalize_id(value) -> str:
     digits = re.sub(r"\D+", "", str(value or ""))
+    # HR kimlik/TCKN must not start with zero. In OCR/Excel it can appear as
+    # 12 digits with an extra leading zero; normalize it to the real value.
     if len(digits) > 10 and digits.startswith("0"):
         digits = digits.lstrip("0")
     return digits
@@ -130,6 +135,9 @@ def normalize_id(value) -> str:
 
 def is_valid_kimlik(value: str) -> bool:
     digits = normalize_id(value)
+    # For this HR workflow the compared kimlik is a personal TCKN: 11 digits
+    # and it must not start with zero. If OCR returns 12 digits with an extra
+    # leading zero, normalize_id() strips it before validation.
     return len(digits) == 11 and not digits.startswith("0")
 
 
@@ -140,10 +148,12 @@ def normalize_kimlik(value: str) -> str:
 
 def valid_kimlik_candidates(text: str) -> list[str]:
     candidates: list[str] = []
+    # First take compact digit runs. This handles normal parsed PDF text.
     for m in re.finditer(r"\d{10,12}", str(text or "")):
         value = normalize_kimlik(m.group(0))
         if value and value not in candidates:
             candidates.append(value)
+    # Then handle rare OCR spacing inside the number. Keep this conservative.
     for m in re.finditer(r"(?:\d\s*){10,12}", str(text or "")):
         value = normalize_kimlik(m.group(0))
         if value and value not in candidates:
@@ -204,18 +214,25 @@ def valid_name_piece(text: str) -> bool:
     if re.fullmatch(r"[\d\s.:-]+", norm):
         return False
     bad_words = {
-        "ADRESI", "ADRES", "ADI", "SOYADI", "UNVANI", "VERGI", "TARIH",
-        "АДРЕС", "ДАТА", "ДАННЫЕ", "НАЛОГОВЫЙ", "НАЛОГОВАЯ", "ИНСПЕКЦИЯ",
-        "ИМЯ", "ФАМИЛИЯ", "ЗВАНИЕ", "ДОЛЖНОСТЬ", "НАИМЕНОВАНИЕ",
-        "НОМЕРНОЙ", "ЗНАК", "СЧЕТ", "ПОЛУЧАТЕЛЯ", "ОТПРАВИТЕЛЯ",
+        "АДРЕС", "ADRES", "ADRESI", "ADRESI", "ДАТА", "TARIH", "ДАННЫЕ",
+        "НАЛОГОВЫЙ", "НАЛОГОВАЯ", "ИНСПЕКЦИЯ", "VERGI", "DAIRESI",
+        "ИМЯ", "AD", "ФАМИЛИЯ", "SOYADI", "ЗВАНИЕ", "UNVANI", "ДОЛЖНОСТЬ",
+        "НАИМЕНОВАНИЕ", "НОМЕРНОЙ", "ЗНАК", "СЧЕТ", "HESAP", "ПОЛУЧАТЕЛЯ",
+        "ОТПРАВИТЕЛЯ", "TOPLAM", "MIKTARI",
     }
     tokens = set(norm.split())
-    return not (tokens and tokens.issubset(bad_words))
+    if tokens and tokens.issubset(bad_words):
+        return False
+    return True
 
 
 def cleanup_name_piece(text: str) -> str:
     text = normalize_spaces(text)
-    text = re.sub(r"(?i)\b(?:Имя|Адрес|Номерной\s+знак|Данные\s+о.*|Adresi|Plaka\s+No).*$", "", text).strip()
+    text = re.sub(
+        r"(?i)\b(?:Имя|Адрес|Ad[ıi]|Adresi|Adres|Plaka|Tarih|Vergi|Номерной\s+знак|Данные\s+о.*)$",
+        "",
+        text,
+    ).strip()
     text = re.sub(r"^[\s:;|/\\-]+|[\s:;|/\\-]+$", "", text)
     text = re.sub(r"[^А-Яа-яЁёA-Za-z0-9İıŞşĞğÜüÖöÇç \-]+", " ", text)
     return normalize_spaces(text)
@@ -330,7 +347,6 @@ def extract_date_from_text(text: str) -> Optional[str]:
         r"Tarih\s+No\s*\n\s*(\d{2}[./-]\d{2}[./-]\d{4})",
         r"\bTarih\b[^\n\r]*?\n[^\d\n\r]*(\d{2}[./-]\d{2}[./-]\d{4})",
         r"Ödeme\s+Tarihi.*?\n\s*\d{2}\s+(\d{2}[./-]\d{2}[./-]\d{4})",
-        r"Odeme\s+Tarihi.*?\n\s*\d{2}\s+(\d{2}[./-]\d{2}[./-]\d{4})",
         r"Дата\s+№\s*документа.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
         r"Дата\s+Номер.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
         r"Дата\s+№.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
@@ -345,55 +361,49 @@ def extract_date_from_text(text: str) -> Optional[str]:
 
 
 def extract_kimlik_from_text(text: str) -> Optional[str]:
-    raw = str(text or "")
-    strict_tckno_patterns = [
-        r"T\s*C\s*K\s*N\s*O\s*/\s*V\s*K\s*N\s*[:\-]?\s*(\d{10,12})",
-        r"TCKNO\s*/\s*VKN\s*[:\-]?\s*(\d{10,12})",
+    text = str(text or "")
+    priority_patterns = [
+        r"TCKNO\s*/\s*VKN\s*:\s*([\d\s]{10,14})",
+        r"TCKNO\s*/\s*VKN\s*([\d\s]{10,14})",
+        r"Vergi\s+Kimlik\s+Numarası.*?TCKNO\s*/\s*VKN\s*:?\s*([\d\s]{10,14})",
     ]
-    for pattern in strict_tckno_patterns:
-        m = re.search(pattern, raw, re.IGNORECASE | re.DOTALL)
+    for pattern in priority_patterns:
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
         if m:
             value = normalize_kimlik(m.group(1))
             if value:
                 return value
 
-    label = re.search(r"T\s*C\s*K\s*N\s*O\s*/?\s*V\s*K\s*N", raw, re.IGNORECASE)
-    if label:
-        window = raw[label.end(): label.end() + 80]
-        candidates = valid_kimlik_candidates(window)
-        if candidates:
-            return candidates[0]
-
-    patterns = [
-        r"ИНН\s*/\s*Кимлик.*?\n\s*033202\s+(\d{10,12})",
-        r"ИНН\s*/\s*Кимлик.*?\n\s*\d{6}\s+(\d{10,12})",
-        r"Иден\.?\s*№\s*/\s*ИНН\s*[:\-]?\s*(\d{10,12})",
+    fallback_patterns = [
+        r"ИНН\s*/\s*Кимлик.*?\n\s*033202\s+([\d\s]{10,14})",
+        r"ИНН\s*/\s*Кимлик.*?\n\s*\d{6}\s+([\d\s]{10,14})",
+        r"Иден\.?\s*№\s*/\s*ИНН\s*[:\-]?\s*([\d\s]{10,14})",
         r"Идентиф\.?\s*номер\s+Тур\.?Респ\.?/\s*ИНН\s*[:\-]?\s*([\d\s]{10,14})",
-        r"Идентификационный\s+номер\s+налогоплательщика.*?(\d{10,12})",
+        r"Идентификационный\s+номер\s+налогоплательщика.*?([\d\s]{10,14})",
         r"ИНН\s*[:\-]?\s*([\d\s]{10,14})",
-        r"Кимлик\s*[:\-]?\s*(\d{10,12})",
+        r"Кимлик\s*[:\-]?\s*([\d\s]{10,14})",
     ]
-    for pattern in patterns:
-        m = re.search(pattern, raw, re.IGNORECASE | re.DOTALL)
+    for pattern in fallback_patterns:
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
         if m:
             value = normalize_kimlik(m.group(1))
             if value:
                 return value
-    return None
+
+    candidates = valid_kimlik_candidates(text)
+    return candidates[0] if candidates else None
 
 
 def extract_name_from_text(text: str) -> tuple[str, str]:
     raw = text or ""
     surname_patterns = [
         r"Soyad[ıi]\s*/\s*[ÜU]nvan[ıi]\s*[:\-]?\s*([^\n\r:]+)",
-        r"Soyadi\s*/\s*Unvani\s*[:\-]?\s*([^\n\r:]+)",
         r"Soyad[ıi]\s*[:\-]?\s*([^\n\r:]+)",
         r"Фамилия\s*/\s*(?:Наименование|Назв\.?\s*имя|Должность|Звание)\s*[:\-]?\s*([^\n\r:]+)",
         r"Фамилия\s*[:\-]?\s*([^\n\r:]+)",
     ]
     name_patterns = [
         r"(?:^|\n|\r)\s*Ad[ıi]\s*[:\-]?\s*([^\n\r:]+)",
-        r"(?:^|\n|\r)\s*Adi\s*[:\-]?\s*([^\n\r:]+)",
         r"\bAd[ıi]\s*[:\-]?\s*([^\n\r:]+)",
         r"(?:^|\n|\r)\s*Имя\s*[:\-]?\s*([^\n\r:]+)",
         r"\bИмя\s*[:\-]?\s*([^\n\r:]+)",
@@ -459,7 +469,7 @@ def extract_amounts_from_text(text: str) -> list[str]:
             found.append(normalize_amount(m.group(1)))
 
     if not found:
-        for m in re.finditer(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b|\b\d+,\d{2}\b", text):
+        for m in AMOUNT_RE.finditer(text):
             found.append(normalize_amount(m.group(0)))
 
     result: list[str] = []
@@ -556,7 +566,7 @@ def parse_pdf(pdf_path: Path, use_ocr: bool = True) -> PdfRecord:
         text_source=text_source,
         date=normalize_date(date) if date else None,
         date_source="TEXT_OR_OCR_TARIH" if date else "",
-        inn_kimlik=normalize_kimlik(inn_kimlik or "") or None,
+        inn_kimlik=normalize_kimlik(inn_kimlik) if inn_kimlik else None,
         kimlik_source="TEXT_OR_OCR_TCKNO_VKN" if inn_kimlik else "",
         surname_title=normalize_spaces(surname_title) if surname_title else None,
         name=normalize_spaces(name) if name else None,
@@ -680,7 +690,88 @@ def ensure_output_headers(ws, header_row: int) -> None:
         ws.cell(row=header_row, column=AH_START + i).value = header
 
 
-def write_record_to_row(ws, row: int, record: PdfRecord) -> None:
+def excel_name_values(ws, row: int, headers: dict[str, int]) -> list[str]:
+    names: list[str] = []
+    for header in ("ФИО", "ФИО рус"):
+        col = headers.get(header)
+        if not col:
+            continue
+        value = normalize_name(ws.cell(row=row, column=col).value)
+        if value and value not in names:
+            names.append(value)
+    return names
+
+
+def get_excel_comparison(ws, row: int, record: PdfRecord, headers: dict[str, int] | None) -> dict:
+    result = {
+        "comments": [],
+        "mismatch_fields": set(),
+        "source_columns": set(),
+    }
+    if not headers:
+        return result
+
+    date_col = headers.get("Дата оплаты")
+    kimlik_col = headers.get("Y.T.C № Кимлики")
+    name_cols = [headers[h] for h in ("ФИО", "ФИО рус") if headers.get(h)]
+
+    pdf_date = normalize_date(record.date or "")
+    if date_col:
+        excel_date = normalize_date(ws.cell(row=row, column=date_col).value)
+        if pdf_date and excel_date and pdf_date != excel_date:
+            result["comments"].append(f"Дата: PDF {pdf_date} ≠ Excel {excel_date}")
+            result["mismatch_fields"].add("date")
+            result["source_columns"].add(date_col)
+
+    pdf_kimlik = normalize_kimlik(record.inn_kimlik or "") or normalize_id(record.inn_kimlik or "")
+    if kimlik_col:
+        excel_kimlik = normalize_kimlik(ws.cell(row=row, column=kimlik_col).value) or normalize_id(ws.cell(row=row, column=kimlik_col).value)
+        if pdf_kimlik and excel_kimlik and pdf_kimlik != excel_kimlik:
+            result["comments"].append(f"Кимлик: PDF {pdf_kimlik} ≠ Excel {excel_kimlik}")
+            result["mismatch_fields"].add("kimlik")
+            result["source_columns"].add(kimlik_col)
+
+    pdf_names = record_name_variants(record)
+    excel_names = excel_name_values(ws, row, headers)
+    if pdf_names and excel_names and not any(name in excel_names for name in pdf_names):
+        result["comments"].append(f"ФИО: PDF {' / '.join(pdf_names)} ≠ Excel {' / '.join(excel_names)}")
+        result["mismatch_fields"].add("name")
+        result["source_columns"].update(name_cols)
+    elif not pdf_names and excel_names:
+        result["comments"].append(f"ФИО не распознано; в Excel: {' / '.join(excel_names)}")
+        result["mismatch_fields"].add("name")
+        result["source_columns"].update(name_cols)
+
+    return result
+
+
+def apply_mismatch_highlight(ws, row: int, comparison: dict) -> None:
+    mismatch_fields = comparison.get("mismatch_fields", set())
+    if "date" in mismatch_fields:
+        ws.cell(row=row, column=AH_START).fill = MISMATCH_FILL
+    if "kimlik" in mismatch_fields:
+        ws.cell(row=row, column=AH_START + 1).fill = MISMATCH_FILL
+    if "name" in mismatch_fields:
+        ws.cell(row=row, column=AH_START + 2).fill = MISMATCH_FILL
+        ws.cell(row=row, column=AH_START + 3).fill = MISMATCH_FILL
+
+    for col in comparison.get("source_columns", set()):
+        ws.cell(row=row, column=col).fill = MISMATCH_FILL
+
+    if comparison.get("comments"):
+        ws.cell(row=row, column=AH_START + 6).fill = COMMENT_FILL
+
+
+def make_comparison_comment(ws, row: int | None, record: PdfRecord, headers: dict[str, int] | None, match_mode: str = "") -> str:
+    if not row:
+        return "Нет безопасного совпадения с Excel"
+    comments = get_excel_comparison(ws, row, record, headers).get("comments", [])
+    if match_mode and match_mode not in ("ФИО + дата из документа + кимлик",):
+        comments.append(f"Режим сопоставления: {match_mode}")
+    return "; ".join(comments)
+
+
+def write_record_to_row(ws, row: int, record: PdfRecord, headers: dict[str, int] | None = None, match_mode: str = "") -> str:
     ws.cell(row=row, column=AH_START).value = record.date
     kimlik_cell = ws.cell(row=row, column=AH_START + 1)
     kimlik_cell.value = normalize_kimlik(record.inn_kimlik or "") or normalize_id(record.inn_kimlik or "")
@@ -694,6 +785,15 @@ def write_record_to_row(ws, row: int, record: PdfRecord) -> None:
         cell.value = amount
         if amount is not None:
             cell.number_format = "#,##0.00"
+
+    comparison = get_excel_comparison(ws, row, record, headers)
+    comments = list(comparison.get("comments", []))
+    if match_mode and match_mode not in ("ФИО + дата из документа + кимлик",):
+        comments.append(f"Режим сопоставления: {match_mode}")
+    comment_text = "; ".join(comments)
+    ws.cell(row=row, column=AH_START + 6).value = comment_text
+    apply_mismatch_highlight(ws, row, comparison)
+    return comment_text
 
 
 def save_csv(path: Path, rows: list[dict]) -> None:
@@ -735,6 +835,8 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
         raise FileNotFoundError(f"В папке нет PDF-файлов: {pdf_dir}")
 
     print(f"Найдено PDF-файлов: {len(pdf_files)}", flush=True)
+    print("Открываю Excel...", flush=True)
+
     wb = load_workbook(excel_path)
     ws = wb[sheet_name] if sheet_name else wb.active
     header_row = find_header_row(ws)
@@ -746,10 +848,14 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
     unmatched_rows = []
     debug_rows = []
 
+    total_pdf = len(pdf_files)
     for idx, pdf_path in enumerate(pdf_files, start=1):
-        print(f"[{idx}/{len(pdf_files)}] Читаю PDF: {pdf_path.name}", flush=True)
+        print(f"[{idx}/{total_pdf}] Читаю PDF: {pdf_path.name}", flush=True)
         rec = parse_pdf(pdf_path, use_ocr=use_ocr)
         row, match_mode = find_excel_row(indexes, rec)
+
+        comparison_comment = make_comparison_comment(ws, row, rec, headers, match_mode)
+
         row_info = {
             "pdf_file": rec.filename,
             "text_source": rec.text_source,
@@ -769,28 +875,39 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
             "match_key_name": rec.full_name,
             "match_key_name_reversed": rec.reversed_full_name,
             "match_key_date": normalize_date(rec.date or ""),
-            "match_key_id": normalize_id(rec.inn_kimlik or ""),
+            "match_key_id": normalize_kimlik(rec.inn_kimlik or "") or normalize_id(rec.inn_kimlik or ""),
             "match_mode": match_mode,
             "excel_row": row or "",
+            "Комментарий сверки": comparison_comment,
         }
         parsed_rows.append(row_info)
-        debug_rows.append({
-            "pdf_file": rec.filename,
-            "raw_top_date_ocr": rec.raw_top_date_ocr,
-            "raw_kimlik_ocr": rec.raw_kimlik_ocr,
-            "raw_name_ocr": rec.raw_name_ocr,
-            "payment_pages": row_info["Полезные страницы"],
-            "skipped_pages": row_info["Пропущенные страницы"],
-        })
+        debug_rows.append(
+            {
+                "pdf_file": rec.filename,
+                "raw_top_date_ocr": rec.raw_top_date_ocr,
+                "raw_kimlik_ocr": rec.raw_kimlik_ocr,
+                "raw_name_ocr": rec.raw_name_ocr,
+                "payment_pages": row_info["Полезные страницы"],
+                "skipped_pages": row_info["Пропущенные страницы"],
+            }
+        )
+
         if row:
-            write_record_to_row(ws, row, rec)
+            write_record_to_row(ws, row, rec, headers=headers, match_mode=match_mode)
         else:
             unmatched_rows.append(row_info)
 
     output_excel = excel_path.with_name(f"{excel_path.stem}_RU_decont_filled.xlsx")
-    save_csv(excel_path.with_name("RU_decont_parsed_report.csv"), parsed_rows)
-    save_csv(excel_path.with_name("RU_decont_unmatched_report.csv"), unmatched_rows)
-    save_csv(excel_path.with_name("RU_decont_ocr_debug_report.csv"), debug_rows)
+    parsed_report = excel_path.with_name("RU_decont_parsed_report.csv")
+    unmatched_report = excel_path.with_name("RU_decont_unmatched_report.csv")
+    debug_report = excel_path.with_name("RU_decont_ocr_debug_report.csv")
+
+    print("Сохраняю отчёты CSV...", flush=True)
+    save_csv(parsed_report, parsed_rows)
+    save_csv(unmatched_report, unmatched_rows)
+    save_csv(debug_report, debug_rows)
+
+    print("Сохраняю итоговый Excel... Не закрывайте окно.", flush=True)
     wb.save(output_excel)
 
     print("Готово.")
@@ -798,10 +915,13 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
     print(f"Совпадений записано в Excel: {len(pdf_files) - len(unmatched_rows)}")
     print(f"Несопоставленных PDF: {len(unmatched_rows)}")
     print(f"Результат сохранён: {output_excel}")
+    print(f"Отчёт по распознанным PDF: {parsed_report}")
+    print(f"Отчёт по несопоставленным PDF: {unmatched_report}")
+    print(f"OCR debug отчёт: {debug_report}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Заполняет Excel данными из PDF-платёжек Ziraat")
+    parser = argparse.ArgumentParser(description="Заполняет Excel данными из русских и турецких PDF-платёжек")
     parser.add_argument("--excel", required=True, help="Путь к исходному Excel-файлу")
     parser.add_argument("--pdf-dir", default="pdf_result", help="Папка с PDF-файлами")
     parser.add_argument("--sheet", default=None, help="Имя листа Excel, если нужен не активный лист")
