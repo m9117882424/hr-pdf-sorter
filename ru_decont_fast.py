@@ -24,7 +24,7 @@ def parse_task(pdf_path_text: str, use_ocr: bool):
     return pdf_path_text, rd.parse_pdf(pdf_path, use_ocr=use_ocr)
 
 
-def row_info(rec, row, match_mode: str) -> dict:
+def row_info(rec, row, match_mode: str, comparison_comment: str = "") -> dict:
     amounts = rec_attr(rec, "amounts", []) or []
     return {
         "pdf_file": rec_attr(rec, "filename"),
@@ -45,9 +45,10 @@ def row_info(rec, row, match_mode: str) -> dict:
         "match_key_name": rec_attr(rec, "full_name"),
         "match_key_name_reversed": rec_attr(rec, "reversed_full_name"),
         "match_key_date": rd.normalize_date(rec_attr(rec, "date") or ""),
-        "match_key_id": rd.normalize_id(rec_attr(rec, "inn_kimlik") or ""),
+        "match_key_id": rd.normalize_kimlik(rec_attr(rec, "inn_kimlik") or "") or rd.normalize_id(rec_attr(rec, "inn_kimlik") or ""),
         "match_mode": match_mode,
         "excel_row": row or "",
+        "Комментарий сверки": comparison_comment,
     }
 
 
@@ -108,7 +109,8 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name=None, use_ocr: bool = Tr
     for idx in range(1, len(pdf_files) + 1):
         _pdf_path, rec = parsed[idx]
         row, match_mode = rd.find_excel_row(indexes, rec)
-        info = row_info(rec, row, match_mode)
+        comparison_comment = rd.make_comparison_comment(ws, row, rec, headers, match_mode) if hasattr(rd, "make_comparison_comment") else ""
+        info = row_info(rec, row, match_mode, comparison_comment)
         parsed_rows.append(info)
         debug_rows.append({
             "pdf_file": rec_attr(rec, "filename"),
@@ -119,7 +121,10 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name=None, use_ocr: bool = Tr
             "skipped_pages": info["skipped_pages"],
         })
         if row:
-            rd.write_record_to_row(ws, row, rec)
+            try:
+                rd.write_record_to_row(ws, row, rec, headers=headers, match_mode=match_mode)
+            except TypeError:
+                rd.write_record_to_row(ws, row, rec)
         else:
             unmatched_rows.append(info)
 
