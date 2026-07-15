@@ -30,6 +30,9 @@ DEFAULT_TESSERACT = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
 if DEFAULT_TESSERACT.exists():
     pytesseract.pytesseract.tesseract_cmd = str(DEFAULT_TESSERACT)
 
+DATE_RE = re.compile(r"\b(\d{2})[./-](\d{2})[./-](\d{4})\b")
+AMOUNT_RE = re.compile(r"\b\d{1,3}(?:[.\s]\d{3})*,\d{2}\b|\b\d+,\d{2}\b")
+
 
 @dataclass
 class PdfRecord:
@@ -61,14 +64,34 @@ class PdfRecord:
     def full_name(self) -> str:
         return normalize_name(f"{self.surname_title or ''} {self.name or ''}")
 
+    @property
+    def reversed_full_name(self) -> str:
+        return normalize_name(f"{self.name or ''} {self.surname_title or ''}")
+
 
 def normalize_spaces(text) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+def normalize_header(text) -> str:
+    return normalize_spaces(str(text or "").replace("\n", " "))
+
+
 def normalize_name(text) -> str:
     text = str(text or "").upper()
-    text = text.replace("Ё", "Е")
+    repl = {
+        "Ё": "Е",
+        "İ": "I",
+        "İ": "I",
+        "Ş": "S",
+        "Ğ": "G",
+        "Ü": "U",
+        "Ö": "O",
+        "Ç": "C",
+        "Â": "A",
+    }
+    for src, dst in repl.items():
+        text = text.replace(src, dst)
     text = re.sub(r"[^А-ЯA-Z0-9 ]+", " ", text)
     return normalize_spaces(text)
 
@@ -78,12 +101,20 @@ def normalize_date(value) -> str:
         return ""
     if isinstance(value, (dt.datetime, dt.date)):
         return value.strftime("%d.%m.%Y")
+    if isinstance(value, (int, float)) and 20000 <= float(value) <= 80000:
+        base = dt.datetime(1899, 12, 30)
+        return (base + dt.timedelta(days=int(value))).strftime("%d.%m.%Y")
     text = str(value).strip()
+    if re.fullmatch(r"\d+(?:\.0+)?", text):
+        serial = float(text)
+        if 20000 <= serial <= 80000:
+            base = dt.datetime(1899, 12, 30)
+            return (base + dt.timedelta(days=int(serial))).strftime("%d.%m.%Y")
     m = re.search(r"(\d{4})-(\d{2})-(\d{2})", text)
     if m:
         yyyy, mm, dd = m.groups()
         return f"{dd}.{mm}.{yyyy}"
-    m = re.search(r"(\d{2})[./-](\d{2})[./-](\d{4})", text)
+    m = DATE_RE.search(text)
     if m:
         dd, mm, yyyy = m.groups()
         return f"{dd}.{mm}.{yyyy}"
@@ -95,8 +126,7 @@ def normalize_id(value) -> str:
 
 
 def normalize_amount(text: str) -> str:
-    text = str(text or "").strip()
-    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"\s+", "", str(text or "").strip())
     m = re.search(
         r"\d{1,3}(?:[.\s]\d{3})*,\d{2}|\d+,\d{2}|\d{1,3}(?:[,\s]\d{3})*\.\d{2}|\d+\.\d{2}",
         text,
@@ -117,8 +147,7 @@ def normalize_amount(text: str) -> str:
 def amount_to_excel_number(text: str):
     if text is None:
         return None
-    text = str(text).strip()
-    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"\s+", "", str(text).strip())
     if not text:
         return None
     if "," in text and "." in text:
@@ -149,21 +178,20 @@ def valid_name_piece(text: str) -> bool:
     if re.fullmatch(r"[\d\s.:-]+", norm):
         return False
     bad_words = {
+        "ADRESI", "ADRES", "ADI", "SOYADI", "UNVANI", "VERGI", "TARIH",
         "АДРЕС", "ДАТА", "ДАННЫЕ", "НАЛОГОВЫЙ", "НАЛОГОВАЯ", "ИНСПЕКЦИЯ",
         "ИМЯ", "ФАМИЛИЯ", "ЗВАНИЕ", "ДОЛЖНОСТЬ", "НАИМЕНОВАНИЕ",
         "НОМЕРНОЙ", "ЗНАК", "СЧЕТ", "ПОЛУЧАТЕЛЯ", "ОТПРАВИТЕЛЯ",
     }
     tokens = set(norm.split())
-    if tokens and tokens.issubset(bad_words):
-        return False
-    return True
+    return not (tokens and tokens.issubset(bad_words))
 
 
 def cleanup_name_piece(text: str) -> str:
     text = normalize_spaces(text)
-    text = re.sub(r"(?i)\b(?:Имя|Адрес|Номерной\s+знак|Данные\s+о.*)$", "", text).strip()
+    text = re.sub(r"(?i)\b(?:Имя|Адрес|Номерной\s+знак|Данные\s+о.*|Adresi|Plaka\s+No).*$", "", text).strip()
     text = re.sub(r"^[\s:;|/\\-]+|[\s:;|/\\-]+$", "", text)
-    text = re.sub(r"[^А-Яа-яЁёA-Za-z0-9 \-]+", " ", text)
+    text = re.sub(r"[^А-Яа-яЁёA-Za-z0-9İıŞşĞğÜüÖöÇç \-]+", " ", text)
     return normalize_spaces(text)
 
 
@@ -196,7 +224,7 @@ def preprocess_for_ocr(img: Image.Image, scale: int = 2, threshold: bool = True)
 def ocr_image(
     img: Image.Image,
     *,
-    lang: str = "rus+eng",
+    lang: str = "rus+eng+tur",
     psm: int = 6,
     whitelist: str | None = None,
     scale: int = 2,
@@ -204,16 +232,18 @@ def ocr_image(
 ) -> str:
     config = f"--oem 3 --psm {psm}"
     if whitelist:
-        safe_whitelist = str(whitelist).replace(chr(34), "").replace(chr(39), "").replace(" ", "")
-        config += f" -c tessedit_char_whitelist={safe_whitelist}"
+        safe = str(whitelist).replace(chr(34), "").replace(chr(39), "").replace(" ", "")
+        config += f" -c tessedit_char_whitelist={safe}"
     prepared = preprocess_for_ocr(img, scale=scale, threshold=threshold)
-    try:
-        return pytesseract.image_to_string(prepared, lang=lang, config=config)
-    except (pytesseract.TesseractError, ValueError):
-        return pytesseract.image_to_string(prepared, lang="eng", config=config)
+    for lang_try in (lang, "rus+eng", "eng"):
+        try:
+            return pytesseract.image_to_string(prepared, lang=lang_try, config=config)
+        except (pytesseract.TesseractError, ValueError):
+            continue
+    return ""
 
 
-def render_pdf_pages(pdf_path: Path, dpi: int = 300) -> list[Image.Image]:
+def render_pdf_pages(pdf_path: Path, dpi: int = 250) -> list[Image.Image]:
     pages: list[Image.Image] = []
     doc = fitz.open(str(pdf_path))
     try:
@@ -235,105 +265,90 @@ def crop_rel(img: Image.Image, box: tuple[float, float, float, float]) -> Image.
 def dark_ratio(img: Image.Image, box: tuple[float, float, float, float]) -> float:
     gray = crop_rel(img, box).convert("L")
     hist = gray.histogram()
-    dark = sum(hist[:180])
-    return dark / max(1, gray.width * gray.height)
+    return sum(hist[:180]) / max(1, gray.width * gray.height)
 
 
-def looks_like_payment_page(img: Image.Image) -> bool:
-    if dark_ratio(img, (0.04, 0.10, 0.96, 0.84)) >= 0.012:
-        return True
-    probe = crop_rel(img, (0.04, 0.05, 0.96, 0.65))
-    txt = normalize_name(ocr_image(probe, lang="rus+eng", psm=6, scale=1, threshold=False))
-    hits = sum(
-        1
-        for key in ("ПЛАТЕЖНОЕ", "ПОРУЧЕНИЕ", "КВИТАНЦИЯ", "СВЕДЕНИЯ", "ПЛАТЕЖ", "ИНН", "КИМЛИК", "ZIRAAT")
-        if key in txt
+def looks_like_payment_page_text(text: str) -> bool:
+    norm = normalize_name(text)
+    keys = (
+        "VERGI", "TAHSIL", "TCKNO", "VKN", "SOYADI", "UNVANI", "MIKTARI", "ZIRAAT",
+        "ИНН", "КИМЛИК", "КВИТАНЦИЯ", "ПЛАТЕЖ", "ФАМИЛИЯ",
     )
-    return hits >= 2
+    return sum(1 for key in keys if key in norm) >= 2
 
 
-def extract_top_right_date_from_page_image(img: Image.Image) -> tuple[str, str]:
-    crops = [
-        (0.58, 0.075, 0.91, 0.185),
-        (0.61, 0.095, 0.82, 0.175),
-        (0.63, 0.115, 0.80, 0.170),
-        (0.62, 0.090, 0.92, 0.170),
-        (0.70, 0.105, 0.92, 0.170),
-        (0.55, 0.065, 0.92, 0.170),
+def looks_like_payment_page_image(img: Image.Image) -> bool:
+    return dark_ratio(img, (0.04, 0.10, 0.96, 0.84)) >= 0.010
+
+
+def extract_text_pages_from_pdf(pdf_path: Path) -> list[str]:
+    chunks: list[str] = []
+    with pdfplumber.open(str(pdf_path)) as pdf:
+        for page in pdf.pages:
+            chunks.append(page.extract_text() or "")
+    return chunks
+
+
+def extract_field(patterns: list[str], text: str, flags=re.IGNORECASE | re.MULTILINE) -> Optional[str]:
+    for pattern in patterns:
+        m = re.search(pattern, text, flags)
+        if m:
+            value = cleanup_name_piece(m.group(1))
+            if value:
+                return value
+    return None
+
+
+def extract_date_from_text(text: str) -> Optional[str]:
+    patterns = [
+        r"Tarih\s+No\s*\n\s*(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"\bTarih\b[^\n\r]*?\n[^\d\n\r]*(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"Ödeme\s+Tarihi.*?\n\s*\d{2}\s+(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"Дата\s+№\s*документа.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"Дата\s+Номер.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"Дата\s+№.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
+        r"Дата\s+оплаты.*?\n\s*02\s+(\d{2}[./-]\d{2}[./-]\d{4})",
     ]
-    raw_parts: list[str] = []
-    for box in crops:
-        part = crop_rel(img, box)
-        for psm in (6, 7, 11):
-            txt = ocr_image(part, lang="eng+rus", psm=psm, whitelist="0123456789./- ", scale=2)
-            raw_parts.append(txt)
-            m = re.search(r"\b(\d{2})[./-](\d{2})[./-](\d{4})\b", txt)
-            if m:
-                return f"{m.group(1)}.{m.group(2)}.{m.group(3)}", "\n".join(raw_parts)
-    return "", "\n".join(raw_parts)
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            return normalize_date(m.group(1))
+    m = DATE_RE.search(text)
+    return normalize_date(m.group(0)) if m else None
 
 
-def extract_kimlik_from_page_image(img: Image.Image) -> tuple[str, str]:
-    crops = [
-        (0.10, 0.245, 0.42, 0.345),
-        (0.14, 0.265, 0.36, 0.335),
-        (0.05, 0.235, 0.55, 0.360),
-        (0.12, 0.245, 0.52, 0.360),
-        (0.18, 0.260, 0.48, 0.350),
-        (0.10, 0.175, 0.42, 0.295),
-        (0.03, 0.170, 0.55, 0.330),
+def extract_kimlik_from_text(text: str) -> Optional[str]:
+    patterns = [
+        r"TCKNO\s*/\s*VKN\s*:\s*(\d{10,12})",
+        r"Vergi\s+Kimlik\s+Numarası.*?TCKNO\s*/\s*VKN\s*:\s*(\d{10,12})",
+        r"ИНН\s*/\s*Кимлик.*?\n\s*033202\s+(\d{10,12})",
+        r"ИНН\s*/\s*Кимлик.*?\n\s*\d{6}\s+(\d{10,12})",
+        r"Иден\.?\s*№\s*/\s*ИНН\s*[:\-]?\s*(\d{10,12})",
+        r"Идентиф\.?\s*номер\s+Тур\.?Респ\.?/\s*ИНН\s*[:\-]?\s*([\d\s]{10,14})",
+        r"Идентификационный\s+номер\s+налогоплательщика.*?(\d{10,12})",
+        r"ИНН\s*[:\-]?\s*([\d\s]{10,14})",
+        r"Кимлик\s*[:\-]?\s*(\d{10,12})",
     ]
-    raw_parts: list[str] = []
-    for box in crops:
-        part = crop_rel(img, box)
-        for psm in (6, 11):
-            txt = ocr_image(part, lang="eng+rus", psm=psm, whitelist="0123456789 ", scale=2)
-            raw_parts.append(txt)
-            compact = re.sub(r"\D+", "", txt)
-            candidates = re.findall(r"\b\d{10,12}\b", txt)
-            if candidates:
-                return candidates[0], "\n".join(raw_parts)
-            m = re.search(r"\d{10,12}", compact)
-            if m:
-                return m.group(0), "\n".join(raw_parts)
-    return "", "\n".join(raw_parts)
-
-
-def extract_amounts_from_page_image(img: Image.Image) -> tuple[list[str], str]:
-    crops = [
-        (0.56, 0.54, 0.80, 0.78),
-        (0.58, 0.55, 0.78, 0.83),
-        (0.60, 0.58, 0.76, 0.78),
-        (0.28, 0.47, 0.87, 0.86),
-    ]
-    raw_parts: list[str] = []
-    found: list[str] = []
-    for box in crops:
-        part = crop_rel(img, box)
-        for psm in (6, 11):
-            txt = ocr_image(part, lang="eng+rus", psm=psm, whitelist="0123456789., ", scale=2)
-            raw_parts.append(txt)
-            for m in re.finditer(r"\b\d{1,3}(?:[ .]\d{3})*,\d{2}\b|\b\d+,\d{2}\b|\b\d{1,3}(?:[ .]\d{3})*\.\d{2}\b", txt):
-                value = normalize_amount(m.group(0))
-                num = amount_to_excel_number(value)
-                if num is not None and num >= 100:
-                    found.append(value)
-        if found:
-            break
-    result: list[str] = []
-    for value in found:
-        if value and value not in result:
-            result.append(value)
-    return result, "\n".join(raw_parts)
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            value = normalize_id(m.group(1))
+            if 10 <= len(value) <= 12:
+                return value
+    return None
 
 
 def extract_name_from_text(text: str) -> tuple[str, str]:
     raw = text or ""
     surname_patterns = [
+        r"Soyad[ıi]\s*/\s*[ÜU]nvan[ıi]\s*[:\-]?\s*([^\n\r:]+)",
+        r"Soyad[ıi]\s*[:\-]?\s*([^\n\r:]+)",
         r"Фамилия\s*/\s*(?:Наименование|Назв\.?\s*имя|Должность|Звание)\s*[:\-]?\s*([^\n\r:]+)",
         r"Фамилия\s*[:\-]?\s*([^\n\r:]+)",
     ]
     name_patterns = [
+        r"(?:^|\n|\r)\s*Ad[ıi]\s*[:\-]?\s*([^\n\r:]+)",
+        r"\bAd[ıi]\s*[:\-]?\s*([^\n\r:]+)",
         r"(?:^|\n|\r)\s*Имя\s*[:\-]?\s*([^\n\r:]+)",
         r"\bИмя\s*[:\-]?\s*([^\n\r:]+)",
     ]
@@ -356,144 +371,6 @@ def extract_name_from_text(text: str) -> tuple[str, str]:
     return surname, name
 
 
-def extract_name_from_page_image(img: Image.Image) -> tuple[str, str, str]:
-    crops = [
-        (0.05, 0.30, 0.76, 0.47),
-        (0.06, 0.34, 0.92, 0.50),
-        (0.05, 0.26, 0.92, 0.48),
-    ]
-    raw_parts: list[str] = []
-    for box in crops:
-        part = crop_rel(img, box)
-        for psm in (6, 11):
-            txt = ocr_image(part, lang="rus+eng", psm=psm, scale=2, threshold=True)
-            raw_parts.append(txt)
-            surname, name = extract_name_from_text(txt)
-            if surname and name:
-                return surname, name, "\n".join(raw_parts)
-    joined = "\n".join(raw_parts)
-    surname, name = extract_name_from_text(joined)
-    return surname, name, joined
-
-
-def extract_doc_fields_by_ocr(pdf_path: Path) -> dict:
-    pages = render_pdf_pages(pdf_path, dpi=300)
-    payment_indexes = [i for i, img in enumerate(pages) if looks_like_payment_page(img)]
-    if not payment_indexes:
-        payment_indexes = list(range(len(pages)))
-
-    first_date = ""
-    first_kimlik = ""
-    date_raw = ""
-    kimlik_raw = ""
-    first_surname = ""
-    first_name = ""
-    name_raw = ""
-    amounts: list[str] = []
-    full_text_parts: list[str] = []
-
-    for idx in payment_indexes:
-        img = pages[idx]
-        if not first_date:
-            first_date, date_raw = extract_top_right_date_from_page_image(img)
-        if not first_kimlik:
-            first_kimlik, kimlik_raw = extract_kimlik_from_page_image(img)
-        if not (first_surname and first_name):
-            surname, name, raw = extract_name_from_page_image(img)
-            name_raw = name_raw or raw
-            if surname:
-                first_surname = first_surname or surname
-            if name:
-                first_name = first_name or name
-        page_amounts, _ = extract_amounts_from_page_image(img)
-        for value in page_amounts:
-            if value not in amounts:
-                amounts.append(value)
-        full_text = ocr_image(img, lang="rus+eng", psm=6, scale=1, threshold=True)
-        full_text_parts.append(full_text)
-        if not (first_surname and first_name):
-            surname, name = extract_name_from_text(full_text)
-            if surname:
-                first_surname = first_surname or surname
-            if name:
-                first_name = first_name or name
-
-    full_text_joined = "\n".join(full_text_parts)
-    if not amounts:
-        amounts = extract_all_amounts(full_text_joined)
-
-    payment_pages = [i + 1 for i in payment_indexes]
-    skipped_pages = [i + 1 for i in range(len(pages)) if i not in payment_indexes]
-    return {
-        "text": full_text_joined,
-        "date": first_date,
-        "inn_kimlik": first_kimlik,
-        "surname_title": first_surname,
-        "name": first_name,
-        "amounts": amounts,
-        "date_raw": date_raw,
-        "kimlik_raw": kimlik_raw,
-        "name_raw": name_raw,
-        "page_count": len(pages),
-        "payment_pages": payment_pages,
-        "skipped_pages": skipped_pages,
-    }
-
-
-def extract_text_pages_from_pdf(pdf_path: Path) -> list[str]:
-    chunks: list[str] = []
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        for page in pdf.pages:
-            chunks.append(page.extract_text() or "")
-    return chunks
-
-
-def extract_text_from_pdf(pdf_path: Path) -> str:
-    return "\n".join(extract_text_pages_from_pdf(pdf_path))
-
-
-def extract_field(patterns: list[str], text: str, flags=re.IGNORECASE | re.MULTILINE) -> Optional[str]:
-    for pattern in patterns:
-        m = re.search(pattern, text, flags)
-        if m:
-            value = normalize_spaces(m.group(1))
-            if value:
-                return value
-    return None
-
-
-def extract_date_from_pdf_text(text: str) -> Optional[str]:
-    date = extract_field(
-        [
-            r"Дата\s+№\s*документа.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
-            r"Дата\s+Номер.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
-            r"Дата\s+№.*?\n.*?(\d{2}[./-]\d{2}[./-]\d{4})",
-            r"Дата\s+оплаты.*?\n\s*02\s+(\d{2}[./-]\d{2}[./-]\d{4})",
-        ],
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    return normalize_date(date) if date else None
-
-
-def extract_kimlik_from_pdf_text(text: str) -> Optional[str]:
-    inn_kimlik = extract_field(
-        [
-            r"ИНН\s*/\s*Кимлик.*?\n\s*033202\s+(\d{10,12})",
-            r"ИНН\s*/\s*Кимлик.*?\n\s*\d{6}\s+(\d{10,12})",
-            r"Иден\.?\s*№\s*/\s*ИНН\s*[:\-]?\s*(\d{10,12})",
-            r"Идентиф\.?\s*номер\s+Тур\.?Респ\.?/\s*ИНН\s*[:\-]?\s*([\d\s]{10,14})",
-            r"Идентификационный\s+номер\s+налогоплательщика.*?(\d{10,12})",
-            r"Идентификационный\s+номер\s+Т\.?Р\.?/ИНН\s*[:\-]?\s*(\d{10,12})",
-            r"ИНН\s*[:\-]?\s*([\d\s]{10,14})",
-            r"Кимлик\s*[:\-]?\s*(\d{10,12})",
-        ],
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    return normalize_id(inn_kimlik) if inn_kimlik else None
-
-
 def extract_name_from_filename(filename: str) -> tuple[str, str]:
     stem = Path(filename).stem
     stem = re.sub(r"(?i)[_\s-]*(RU|RUS|TR)$", "", stem)
@@ -512,39 +389,78 @@ def extract_name_from_filename(filename: str) -> tuple[str, str]:
     return "", ""
 
 
-def extract_all_amounts(text: str) -> list[str]:
+def extract_amounts_from_text(text: str) -> list[str]:
     found: list[str] = []
-    patterns = [
+    for line in str(text or "").splitlines():
+        line_norm = normalize_name(line)
+        if (
+            line_norm.startswith("05 ")
+            or " TOPLAM " in f" {line_norm} "
+            or line_norm.startswith("TOPLAM")
+            or " ИТОГО " in f" {line_norm} "
+            or line_norm.startswith("ИТОГО")
+        ):
+            tokens = re.findall(r"\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}", line)
+            if tokens:
+                found.append(normalize_amount(tokens[-1]))
+
+    preferred_patterns = [
         r"Общее\s+количество\s+платежей\s*:\s*\d+\s+([\d\s.]+,\d{2})",
-        r"ИТОГО\s*\d*\s+([\d\s.]+,\d{2})",
-        r"Итог\s*\d*\s+([\d\s.]+,\d{2})",
-        r"\b20\d{2}\s+\d+\s+([\d\s.]+,\d{2})",
         r"(?:Сумма|Размер)\s*[:\-]?\s*([\d\s.]+,\d{2})",
     ]
-    for pattern in patterns:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
+    for pattern in preferred_patterns:
+        for m in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
             found.append(normalize_amount(m.group(1)))
-    for m in re.finditer(r"\b\d{1,3}(?:[ .]\d{3})*,\d{2}\b|\b\d+,\d{2}\b", text):
-        value = normalize_amount(m.group(0))
-        num = amount_to_excel_number(value)
-        if num is not None and num >= 100:
-            found.append(value)
+
+    if not found:
+        for m in re.finditer(r"\b\d{1,3}(?:\.\d{3})*,\d{2}\b|\b\d+,\d{2}\b", text):
+            found.append(normalize_amount(m.group(0)))
+
     result: list[str] = []
     for value in found:
-        if value and value not in result:
+        num = amount_to_excel_number(value)
+        if num is not None and num >= 100 and value not in result:
             result.append(value)
     return result
 
 
+def page_indexes_for_text(text_pages: list[str]) -> tuple[list[int], list[int]]:
+    payment_indexes = [i for i, text in enumerate(text_pages) if looks_like_payment_page_text(text)]
+    if not payment_indexes:
+        payment_indexes = [i for i, text in enumerate(text_pages) if normalize_spaces(text)]
+    if not payment_indexes:
+        payment_indexes = list(range(len(text_pages)))
+    skipped = [i for i in range(len(text_pages)) if i not in payment_indexes]
+    return payment_indexes, skipped
+
+
+def extract_ocr_text_pages(pdf_path: Path) -> tuple[list[str], list[int], list[int]]:
+    images = render_pdf_pages(pdf_path, dpi=250)
+    payment_indexes = [i for i, img in enumerate(images) if looks_like_payment_page_image(img)]
+    if not payment_indexes:
+        payment_indexes = list(range(len(images)))
+    text_pages = []
+    for i in payment_indexes:
+        text_pages.append(ocr_image(images[i], lang="rus+eng+tur", psm=6, scale=1, threshold=True))
+    skipped = [i for i in range(len(images)) if i not in payment_indexes]
+    return text_pages, payment_indexes, skipped
+
+
 def parse_pdf(pdf_path: Path, use_ocr: bool = True) -> PdfRecord:
-    text_pages = extract_text_pages_from_pdf(pdf_path)
-    text = "\n".join(text_pages)
+    try:
+        text_pages = extract_text_pages_from_pdf(pdf_path)
+    except Exception:
+        text_pages = []
+    page_count = len(text_pages)
+    payment_indexes, skipped_indexes = page_indexes_for_text(text_pages) if text_pages else ([], [])
+    selected_text_pages = [text_pages[i] for i in payment_indexes] if payment_indexes else text_pages
+    text = "\n".join(selected_text_pages)
     text_source = "PDF_TEXT"
 
-    date = extract_date_from_pdf_text(text)
-    inn_kimlik = extract_kimlik_from_pdf_text(text)
+    date = extract_date_from_text(text)
+    inn_kimlik = extract_kimlik_from_text(text)
     surname_title, name = extract_name_from_text(text)
-    amounts = extract_all_amounts(text)
+    amounts = extract_amounts_from_text(text)
 
     needs_ocr = use_ocr and (
         len(normalize_spaces(text)) < 80
@@ -555,17 +471,24 @@ def parse_pdf(pdf_path: Path, use_ocr: bool = True) -> PdfRecord:
         or not amounts
     )
 
-    ocr_fields: dict = {}
+    raw_ocr_text = ""
     if needs_ocr:
-        ocr_fields = extract_doc_fields_by_ocr(pdf_path)
-        if ocr_fields.get("text"):
-            text = f"{text}\n{ocr_fields['text']}" if text else ocr_fields["text"]
-        text_source = "OCR_PAYMENT_PAGES" if len(normalize_spaces("\n".join(text_pages))) < 80 else "PDF_TEXT+OCR_PAYMENT_PAGES"
-        date = ocr_fields.get("date") or date
-        inn_kimlik = ocr_fields.get("inn_kimlik") or inn_kimlik
-        surname_title = ocr_fields.get("surname_title") or surname_title
-        name = ocr_fields.get("name") or name
-        amounts = ocr_fields.get("amounts") or amounts or extract_all_amounts(text)
+        ocr_text_pages, ocr_payment_indexes, ocr_skipped_indexes = extract_ocr_text_pages(pdf_path)
+        ocr_text = "\n".join(ocr_text_pages)
+        raw_ocr_text = ocr_text
+        page_count = page_count or (len(ocr_payment_indexes) + len(ocr_skipped_indexes))
+        payment_indexes = ocr_payment_indexes
+        skipped_indexes = ocr_skipped_indexes
+        text_source = "OCR_PAYMENT_PAGES" if len(normalize_spaces(text)) < 80 else "PDF_TEXT+OCR_PAYMENT_PAGES"
+        date = date or extract_date_from_text(ocr_text)
+        inn_kimlik = inn_kimlik or extract_kimlik_from_text(ocr_text)
+        if not (surname_title and name):
+            ocr_surname, ocr_name = extract_name_from_text(ocr_text)
+            surname_title = surname_title or ocr_surname
+            name = name or ocr_name
+        if not amounts:
+            amounts = extract_amounts_from_text(ocr_text)
+        text = f"{text}\n{ocr_text}" if text else ocr_text
 
     if not surname_title or not name:
         text_surname, text_name = extract_name_from_text(text)
@@ -578,39 +501,38 @@ def parse_pdf(pdf_path: Path, use_ocr: bool = True) -> PdfRecord:
     if not name or not valid_name_piece(name):
         name = file_name
 
-    page_count = ocr_fields.get("page_count", len(text_pages))
-    payment_pages = ocr_fields.get("payment_pages", list(range(1, page_count + 1)))
-    skipped_pages = ocr_fields.get("skipped_pages", [])
+    page_count = page_count or len(text_pages)
+    payment_pages = [i + 1 for i in payment_indexes] if payment_indexes else list(range(1, page_count + 1))
+    skipped_pages = [i + 1 for i in skipped_indexes]
 
     return PdfRecord(
         filename=pdf_path.name,
         text_source=text_source,
         date=normalize_date(date) if date else None,
-        date_source="OCR_TOP_RIGHT_DATE_CELL" if ocr_fields.get("date") else ("PDF_TEXT_OR_FULL_OCR_REGEX" if date else ""),
+        date_source="TEXT_OR_OCR_TARIH" if date else "",
         inn_kimlik=normalize_id(inn_kimlik) if inn_kimlik else None,
-        kimlik_source="OCR_INN_KIMLIK_CELL" if ocr_fields.get("inn_kimlik") else ("PDF_TEXT_OR_FULL_OCR_REGEX" if inn_kimlik else ""),
+        kimlik_source="TEXT_OR_OCR_TCKNO_VKN" if inn_kimlik else "",
         surname_title=normalize_spaces(surname_title) if surname_title else None,
         name=normalize_spaces(name) if name else None,
         amounts=amounts,
-        raw_top_date_ocr=ocr_fields.get("date_raw", ""),
-        raw_kimlik_ocr=ocr_fields.get("kimlik_raw", ""),
-        raw_name_ocr=ocr_fields.get("name_raw", ""),
+        raw_top_date_ocr=raw_ocr_text[:2000],
+        raw_kimlik_ocr=raw_ocr_text[:2000],
+        raw_name_ocr=raw_ocr_text[:2000],
         page_count=page_count,
         payment_pages=payment_pages,
         skipped_pages=skipped_pages,
     )
 
 
-def find_header_row(ws, required_headers: list[str], max_scan_rows: int = 20) -> int:
-    required = {normalize_spaces(x).lower() for x in required_headers}
+def find_header_row(ws, required_headers: list[str] | None = None, max_scan_rows: int = 30) -> int:
     for row in range(1, max_scan_rows + 1):
-        values = []
-        for col in range(1, ws.max_column + 1):
-            value = ws.cell(row=row, column=col).value
-            values.append(normalize_spaces(value).lower() if value is not None else "")
-        if required.issubset(set(values)):
+        values = {normalize_header(ws.cell(row=row, column=col).value).lower() for col in range(1, ws.max_column + 1)}
+        has_id = "y.t.c № кимлики" in values
+        has_date = "дата оплаты" in values
+        has_fio = "фио" in values or "фио рус" in values
+        if has_id and has_date and has_fio:
             return row
-    raise ValueError(f"Не найдены заголовки: {', '.join(required_headers)}")
+    raise ValueError("Не найдены обязательные заголовки: ФИО/ФИО рус, Дата оплаты, Y.T.C № Кимлики")
 
 
 def map_headers(ws, header_row: int) -> dict[str, int]:
@@ -618,16 +540,25 @@ def map_headers(ws, header_row: int) -> dict[str, int]:
     for col in range(1, ws.max_column + 1):
         value = ws.cell(row=header_row, column=col).value
         if value is not None:
-            headers[normalize_spaces(value)] = col
+            headers[normalize_header(value)] = col
     return headers
 
 
+def row_name_values(ws, row: int, name_cols: list[int]) -> list[str]:
+    result = []
+    for col in name_cols:
+        name = normalize_name(ws.cell(row=row, column=col).value)
+        if name and name not in result:
+            result.append(name)
+    return result
+
+
 def build_excel_indexes(ws, header_row: int, headers: dict[str, int]) -> dict:
-    fio_col = headers.get("ФИО рус")
     date_col = headers.get("Дата оплаты")
     kimlik_col = headers.get("Y.T.C № Кимлики")
-    if not fio_col or not date_col or not kimlik_col:
-        raise ValueError("В Excel не найдены обязательные столбцы: ФИО рус, Дата оплаты, Y.T.C № Кимлики")
+    name_cols = [headers[h] for h in ("ФИО", "ФИО рус") if headers.get(h)]
+    if not date_col or not kimlik_col or not name_cols:
+        raise ValueError("В Excel не найдены обязательные столбцы: ФИО/ФИО рус, Дата оплаты, Y.T.C № Кимлики")
 
     exact = {}
     by_date_id = defaultdict(list)
@@ -636,20 +567,18 @@ def build_excel_indexes(ws, header_row: int, headers: dict[str, int]) -> dict:
     by_name = defaultdict(list)
 
     for row in range(header_row + 1, ws.max_row + 1):
-        fio = normalize_name(ws.cell(row=row, column=fio_col).value)
         pay_date = normalize_date(ws.cell(row=row, column=date_col).value)
         kimlik = normalize_id(ws.cell(row=row, column=kimlik_col).value)
+        names = row_name_values(ws, row, name_cols)
 
         if pay_date and kimlik:
             by_date_id[(pay_date, kimlik)].append(row)
 
-        if not fio:
-            continue
-
-        exact[(fio, pay_date, kimlik)] = row
-        by_name_date[(fio, pay_date)].append(row)
-        by_name_id[(fio, kimlik)].append(row)
-        by_name[fio].append(row)
+        for fio in names:
+            exact[(fio, pay_date, kimlik)] = row
+            by_name_date[(fio, pay_date)].append(row)
+            by_name_id[(fio, kimlik)].append(row)
+            by_name[fio].append(row)
 
     return {
         "exact": exact,
@@ -660,30 +589,40 @@ def build_excel_indexes(ws, header_row: int, headers: dict[str, int]) -> dict:
     }
 
 
+def record_name_variants(rec: PdfRecord) -> list[str]:
+    values = []
+    for value in (rec.full_name, rec.reversed_full_name):
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
 def find_excel_row(indexes: dict, rec: PdfRecord) -> tuple[Optional[int], str]:
-    fio = rec.full_name
+    names = record_name_variants(rec)
     date = normalize_date(rec.date or "")
     kimlik = normalize_id(rec.inn_kimlik or "")
 
-    if fio and date and kimlik:
-        row = indexes["exact"].get((fio, date, kimlik))
-        if row:
-            return row, "ФИО + дата из документа + кимлик"
-
     if date and kimlik:
+        for fio in names:
+            row = indexes["exact"].get((fio, date, kimlik))
+            if row:
+                return row, "ФИО + дата из документа + кимлик"
+
         rows = indexes["by_date_id"].get((date, kimlik), [])
         if len(rows) == 1:
             return rows[0], "дата из документа + кимлик, строка уникальна"
 
-    if fio and date:
-        rows = indexes["by_name_date"].get((fio, date), [])
-        if len(rows) == 1:
-            return rows[0], "ФИО + дата из документа"
-    if fio and kimlik:
-        rows = indexes["by_name_id"].get((fio, kimlik), [])
-        if len(rows) == 1:
-            return rows[0], "ФИО + кимлик"
-    if fio:
+    if date:
+        for fio in names:
+            rows = indexes["by_name_date"].get((fio, date), [])
+            if len(rows) == 1:
+                return rows[0], "ФИО + дата из документа"
+    if kimlik:
+        for fio in names:
+            rows = indexes["by_name_id"].get((fio, kimlik), [])
+            if len(rows) == 1:
+                return rows[0], "ФИО + кимлик"
+    for fio in names:
         rows = indexes["by_name"].get(fio, [])
         if len(rows) == 1:
             return rows[0], "только ФИО, сотрудник уникален в Excel"
@@ -700,23 +639,19 @@ def write_record_to_row(ws, row: int, record: PdfRecord) -> None:
     ws.cell(row=row, column=AH_START + 1).value = record.inn_kimlik
     ws.cell(row=row, column=AH_START + 2).value = record.surname_title
     ws.cell(row=row, column=AH_START + 3).value = record.name
-
     amount_1 = amount_to_excel_number(record.amounts[0]) if len(record.amounts) >= 1 else None
     amount_2 = amount_to_excel_number(record.amounts[1]) if len(record.amounts) >= 2 else None
-    cell_1 = ws.cell(row=row, column=AH_START + 4)
-    cell_2 = ws.cell(row=row, column=AH_START + 5)
-    cell_1.value = amount_1
-    cell_2.value = amount_2
-    if amount_1 is not None:
-        cell_1.number_format = "#,##0.00"
-    if amount_2 is not None:
-        cell_2.number_format = "#,##0.00"
+    for offset, amount in ((4, amount_1), (5, amount_2)):
+        cell = ws.cell(row=row, column=AH_START + offset)
+        cell.value = amount
+        if amount is not None:
+            cell.number_format = "#,##0.00"
 
 
 def save_csv(path: Path, rows: list[dict]) -> None:
     if not rows:
         rows = [{"status": "empty"}]
-    fieldnames = []
+    fieldnames: list[str] = []
     for row in rows:
         for key in row.keys():
             if key not in fieldnames:
@@ -739,6 +674,32 @@ def unique_pdf_files(pdf_dir: Path) -> list[Path]:
     return result
 
 
+def row_info(rec: PdfRecord, row: Optional[int], match_mode: str) -> dict:
+    return {
+        "pdf_file": rec.filename,
+        "text_source": rec.text_source,
+        "Страниц PDF": rec.page_count,
+        "Полезные страницы": ",".join(map(str, rec.payment_pages or [])),
+        "Пропущенные страницы": ",".join(map(str, rec.skipped_pages or [])),
+        "Дата": rec.date or "",
+        "date_source": rec.date_source,
+        "ИНН / Кимлик": rec.inn_kimlik or "",
+        "kimlik_source": rec.kimlik_source,
+        "Фамилия / Наименование": rec.surname_title or "",
+        "Имя": rec.name or "",
+        "Сумма": rec.amounts[0] if len(rec.amounts) >= 1 else "",
+        "Сумма 2": rec.amounts[1] if len(rec.amounts) >= 2 else "",
+        "Все суммы": ";".join(rec.amounts or []),
+        "Кол-во сумм": len(rec.amounts or []),
+        "match_key_name": rec.full_name,
+        "match_key_name_reversed": rec.reversed_full_name,
+        "match_key_date": normalize_date(rec.date or ""),
+        "match_key_id": normalize_id(rec.inn_kimlik or ""),
+        "match_mode": match_mode,
+        "excel_row": row or "",
+    }
+
+
 def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, use_ocr: bool = True) -> None:
     if use_ocr:
         check_tesseract()
@@ -746,14 +707,12 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
         raise FileNotFoundError(f"Excel не найден: {excel_path}")
     if not pdf_dir.exists() or not pdf_dir.is_dir():
         raise FileNotFoundError(f"Папка с PDF не найдена: {pdf_dir}")
-
     pdf_files = unique_pdf_files(pdf_dir)
     if not pdf_files:
         raise FileNotFoundError(f"В папке нет PDF-файлов: {pdf_dir}")
 
     print(f"Найдено PDF-файлов: {len(pdf_files)}", flush=True)
     print("Открываю Excel...", flush=True)
-
     wb = load_workbook(excel_path)
     ws = wb[sheet_name] if sheet_name else wb.active
     header_row = find_header_row(ws, ["ФИО рус", "Дата оплаты", "Y.T.C № Кимлики"])
@@ -765,50 +724,24 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
     unmatched_rows = []
     debug_rows = []
 
-    total_pdf = len(pdf_files)
     for idx, pdf_path in enumerate(pdf_files, start=1):
-        print(f"[{idx}/{total_pdf}] Читаю PDF: {pdf_path.name}", flush=True)
+        print(f"[{idx}/{len(pdf_files)}] Читаю PDF: {pdf_path.name}", flush=True)
         rec = parse_pdf(pdf_path, use_ocr=use_ocr)
         row, match_mode = find_excel_row(indexes, rec)
-
-        row_info = {
+        info = row_info(rec, row, match_mode)
+        parsed_rows.append(info)
+        debug_rows.append({
             "pdf_file": rec.filename,
-            "text_source": rec.text_source,
-            "Страниц PDF": rec.page_count,
-            "Полезные страницы": ",".join(map(str, rec.payment_pages or [])),
-            "Пропущенные страницы": ",".join(map(str, rec.skipped_pages or [])),
-            "Дата": rec.date or "",
-            "date_source": rec.date_source,
-            "ИНН / Кимлик": rec.inn_kimlik or "",
-            "kimlik_source": rec.kimlik_source,
-            "Фамилия / Наименование": rec.surname_title or "",
-            "Имя": rec.name or "",
-            "Сумма": rec.amounts[0] if len(rec.amounts) >= 1 else "",
-            "Сумма 2": rec.amounts[1] if len(rec.amounts) >= 2 else "",
-            "Все суммы": ";".join(rec.amounts or []),
-            "Кол-во сумм": len(rec.amounts or []),
-            "match_key_name": rec.full_name,
-            "match_key_date": normalize_date(rec.date or ""),
-            "match_key_id": normalize_id(rec.inn_kimlik or ""),
-            "match_mode": match_mode,
-            "excel_row": row or "",
-        }
-        parsed_rows.append(row_info)
-        debug_rows.append(
-            {
-                "pdf_file": rec.filename,
-                "raw_top_date_ocr": rec.raw_top_date_ocr,
-                "raw_kimlik_ocr": rec.raw_kimlik_ocr,
-                "raw_name_ocr": rec.raw_name_ocr,
-                "payment_pages": row_info["Полезные страницы"],
-                "skipped_pages": row_info["Пропущенные страницы"],
-            }
-        )
-
+            "raw_top_date_ocr": rec.raw_top_date_ocr,
+            "raw_kimlik_ocr": rec.raw_kimlik_ocr,
+            "raw_name_ocr": rec.raw_name_ocr,
+            "payment_pages": info["Полезные страницы"],
+            "skipped_pages": info["Пропущенные страницы"],
+        })
         if row:
             write_record_to_row(ws, row, rec)
         else:
-            unmatched_rows.append(row_info)
+            unmatched_rows.append(info)
 
     output_excel = excel_path.with_name(f"{excel_path.stem}_RU_decont_filled.xlsx")
     parsed_report = excel_path.with_name("RU_decont_parsed_report.csv")
@@ -819,7 +752,6 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
     save_csv(parsed_report, parsed_rows)
     save_csv(unmatched_report, unmatched_rows)
     save_csv(debug_report, debug_rows)
-
     print("Сохраняю итоговый Excel... Не закрывайте окно.", flush=True)
     wb.save(output_excel)
 
@@ -834,7 +766,7 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name: Optional[str] = None, u
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Заполняет Excel данными из русских PDF-платёжек с OCR ячеек")
+    parser = argparse.ArgumentParser(description="Заполняет Excel данными из PDF-платёжек Ziraat Bankasi")
     parser.add_argument("--excel", required=True, help="Путь к исходному Excel-файлу")
     parser.add_argument("--pdf-dir", default="pdf_result", help="Папка с PDF-файлами")
     parser.add_argument("--sheet", default=None, help="Имя листа Excel, если нужен не активный лист")
