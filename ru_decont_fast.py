@@ -10,31 +10,42 @@ from openpyxl import load_workbook
 import ru_decont as rd
 
 
+def rec_attr(rec, name: str, default=""):
+    """Read an optional PdfRecord attribute safely.
+
+    This keeps the fast runner compatible when ru_decont.py and
+    ru_decont_fast.py are updated out of sync on a local workstation.
+    """
+    return getattr(rec, name, default)
+
+
 def parse_task(pdf_path_text: str, use_ocr: bool):
     pdf_path = Path(pdf_path_text)
     return pdf_path_text, rd.parse_pdf(pdf_path, use_ocr=use_ocr)
 
 
 def row_info(rec, row, match_mode: str) -> dict:
+    amounts = rec_attr(rec, "amounts", []) or []
     return {
-        "pdf_file": rec.filename,
-        "text_source": rec.text_source,
-        "pages": rec.page_count,
-        "payment_pages": ",".join(map(str, rec.payment_pages or [])),
-        "skipped_pages": ",".join(map(str, rec.skipped_pages or [])),
-        "Дата": rec.date or "",
-        "date_source": rec.date_source,
-        "ИНН / Кимлик": rec.inn_kimlik or "",
-        "kimlik_source": rec.kimlik_source,
-        "Фамилия / Наименование": rec.surname_title or "",
-        "Имя": rec.name or "",
-        "Сумма": rec.amounts[0] if len(rec.amounts) >= 1 else "",
-        "Сумма 2": rec.amounts[1] if len(rec.amounts) >= 2 else "",
-        "all_amounts": ";".join(rec.amounts or []),
-        "amount_count": len(rec.amounts or []),
-        "match_key_name": rec.full_name,
-        "match_key_date": rd.normalize_date(rec.date or ""),
-        "match_key_id": rd.normalize_id(rec.inn_kimlik or ""),
+        "pdf_file": rec_attr(rec, "filename"),
+        "text_source": rec_attr(rec, "text_source"),
+        "pages": rec_attr(rec, "page_count", 0),
+        "payment_pages": ",".join(map(str, rec_attr(rec, "payment_pages", []) or [])),
+        "skipped_pages": ",".join(map(str, rec_attr(rec, "skipped_pages", []) or [])),
+        "Дата": rec_attr(rec, "date") or "",
+        "date_source": rec_attr(rec, "date_source"),
+        "ИНН / Кимлик": rec_attr(rec, "inn_kimlik") or "",
+        "kimlik_source": rec_attr(rec, "kimlik_source"),
+        "Фамилия / Наименование": rec_attr(rec, "surname_title") or "",
+        "Имя": rec_attr(rec, "name") or "",
+        "Сумма": amounts[0] if len(amounts) >= 1 else "",
+        "Сумма 2": amounts[1] if len(amounts) >= 2 else "",
+        "all_amounts": ";".join(amounts),
+        "amount_count": len(amounts),
+        "match_key_name": rec_attr(rec, "full_name"),
+        "match_key_name_reversed": rec_attr(rec, "reversed_full_name"),
+        "match_key_date": rd.normalize_date(rec_attr(rec, "date") or ""),
+        "match_key_id": rd.normalize_id(rec_attr(rec, "inn_kimlik") or ""),
         "match_mode": match_mode,
         "excel_row": row or "",
     }
@@ -100,10 +111,10 @@ def process(excel_path: Path, pdf_dir: Path, sheet_name=None, use_ocr: bool = Tr
         info = row_info(rec, row, match_mode)
         parsed_rows.append(info)
         debug_rows.append({
-            "pdf_file": rec.filename,
-            "raw_top_date_ocr": rec.raw_top_date_ocr,
-            "raw_kimlik_ocr": rec.raw_kimlik_ocr,
-            "raw_name_ocr": rec.raw_name_ocr,
+            "pdf_file": rec_attr(rec, "filename"),
+            "raw_top_date_ocr": rec_attr(rec, "raw_top_date_ocr"),
+            "raw_kimlik_ocr": rec_attr(rec, "raw_kimlik_ocr"),
+            "raw_name_ocr": rec_attr(rec, "raw_name_ocr"),
             "payment_pages": info["payment_pages"],
             "skipped_pages": info["skipped_pages"],
         })
